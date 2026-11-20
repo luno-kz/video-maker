@@ -35,7 +35,7 @@ def duration(path):
 # ---------- 1. Script ----------
 def http_json(url, body, headers):
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with urllib.request.urlopen(req, timeout=180) as r:
         return json.loads(r.read())
 
 
@@ -54,26 +54,73 @@ Return ONLY JSON:
 {{"title": "...", "character": "...", "scenes": [{{"narration": "...", "image_prompt": "..."}}]}}"""
     body = {"contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 0.9}}
-    models = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-flash-latest",
-                          "gemini-2.5-flash", "gemini-2.0-flash"] if m]
     last = None
-    for m in models:
+    for m in gemini_models(key):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
         for attempt in range(3):
             try:
                 data = http_json(url, body, {"Content-Type": "application/json",
                                              "x-goog-api-key": key})
-                text = data["candidates"][0]["content"]["parts"][0]["text"]
-                text = re.sub(r"^```(json)?|```$", "", text.strip()).strip()
-                script = json.loads(text)
+                script = parse_json(data["candidates"][0]["content"]["parts"][0]["text"])
                 if script.get("scenes"):
                     log(f"Script ready with model {m}")
                     return script
             except Exception as e:  # try again / next model
                 last = e
                 log(f"Gemini {m} attempt {attempt+1} failed: {e}")
-                time.sleep(5 * (attempt + 1))
-    raise SystemExit(f"Gemini сценарий жаза алмады: {last}")
+                if "404" in str(e) or "400" in str(e):
+                    break
+                time.sleep(10 * (attempt + 1))
+    log(f"Gemini failed ({last}); trying free Pollinations text")
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                "https://text.pollinations.ai/openai",
+                data=json.dumps({"model": "openai", "messages": [{"role": "user", "content": prompt}],
+                                 "response_format": {"type": "json_object"}}).encode(),
+                headers={"Content-Type": "application/json", "User-Agent": "video-maker/1.0"})
+            with urllib.request.urlopen(req, timeout=180) as r:
+                data = json.loads(r.read())
+            script = parse_json(data["choices"][0]["message"]["content"])
+            if script.get("scenes"):
+                log("Script ready with Pollinations")
+                return script
+        except Exception as e:
+            last = e
+            log(f"Pollinations text attempt {attempt+1} failed: {e}")
+            time.sleep(15)
+    raise SystemExit(f"Сценарий жазылмады: {last}")
+
+
+def parse_json(text):
+    text = re.sub(r"^```(json)?|```$", "", text.strip()).strip()
+    return json.loads(text[text.find("{"):text.rfind("}") + 1])
+
+
+def gemini_models(key):
+    """Ask Google which flash text models this key can use right now."""
+    names = []
+    try:
+        req = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+            headers={"x-goog-api-key": key})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            for md in json.loads(r.read()).get("models", []):
+                n = md["name"].split("/", 1)[1]
+                if ("generateContent" in md.get("supportedGenerationMethods", [])
+                        and "flash" in n and not re.search(
+                            r"image|tts|audio|live|embed|vision|thinking|exp|preview", n)):
+                    names.append(n)
+    except Exception as e:
+        log(f"Model list failed: {e}")
+    log(f"Available flash models: {names}")
+    names.sort(key=lambda n: ("latest" not in n, "lite" in n, n), reverse=False)
+    pref = [os.environ.get("GEMINI_MODEL"), "gemini-flash-latest", "gemini-flash-lite-latest"]
+    out = []
+    for n in [p for p in pref if p] + names:
+        if n not in out:
+            out.append(n)
+    return out[:6]
 
 
 # ---------- 2. Images ----------
