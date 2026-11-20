@@ -22,6 +22,8 @@ on:
       style:
         description: "Сурет стилі (ағылшынша)"
         default: "bright cartoon illustration, cinematic lighting, detailed"
+  push:
+    paths: ["request.txt"]
 
 permissions:
   contents: write
@@ -31,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install tools
         run: |
@@ -43,20 +45,31 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TOPIC: ${{ inputs.topic }}
-          SCENES: ${{ inputs.scenes }}
-          VOICE: ${{ inputs.voice }}
-          FORMAT: ${{ inputs.format }}
-          STYLE: ${{ inputs.style }}
+          SCENES: ${{ inputs.scenes || '6' }}
+          VOICE: ${{ inputs.voice || 'aigul' }}
+          FORMAT: ${{ inputs.format || 'vertical' }}
+          STYLE: ${{ inputs.style || 'bright cartoon illustration, cinematic lighting, detailed' }}
         run: |
+          if [ -z "$TOPIC" ] && [ -f request.txt ]; then TOPIC="$(head -n1 request.txt)"; fi
+          echo "TOPIC=$TOPIC" >> "$GITHUB_ENV"
+          set -o pipefail
           python make_video.py --topic "$TOPIC" --scenes "$SCENES" \
-            --voice "$VOICE" --format "$FORMAT" --style "$STYLE"
+            --voice "$VOICE" --format "$FORMAT" --style "$STYLE" 2>&1 | tee run.log
 
       - name: Publish video (download link)
         env:
           GH_TOKEN: ${{ github.token }}
-          TOPIC: ${{ inputs.topic }}
         run: |
           TAG="video-${{ github.run_number }}"
           cp out/video.mp4 "out/$TAG.mp4"
           gh release create "$TAG" "out/$TAG.mp4" out/script.json \
             --title "$TOPIC" --notes "Автоматты жасалған видео: $TOPIC"
+
+      - name: Save error log
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          touch run.log
+          gh release create "log-${{ github.run_number }}" run.log --prerelease \
+            --title "Қате логы #${{ github.run_number }}" --notes "Қате логы"
